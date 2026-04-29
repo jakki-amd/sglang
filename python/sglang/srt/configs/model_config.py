@@ -309,75 +309,63 @@ class ModelConfig:
         )
 
     def _config_draft_model(self):
-        is_draft_model = self.is_draft_model
+        if not self.is_draft_model:
+            return
 
-        if is_draft_model and self.hf_config.architectures[0] in [
+        arch = self.hf_config.architectures[0]
+
+        if arch in (
             "DeepseekV3ForCausalLM",
             "GlmMoeDsaForCausalLM",
-        ]:
+        ):
             self.hf_config.architectures[0] = "DeepseekV3ForCausalLMNextN"
-
-        if is_draft_model and self.hf_config.architectures[0] in [
+        elif arch in (
             "Glm4MoeForCausalLM",
             "Glm4MoeLiteForCausalLM",
-        ]:
-            self.hf_config.architectures[0] = "Glm4MoeForCausalLMNextN"
-
-        if is_draft_model and self.hf_config.architectures[0] in [
-            "GlmOcrForConditionalGeneration",
-        ]:
-            self.hf_config.architectures[0] = "GlmOcrForConditionalGenerationNextN"
-
-        if (
-            is_draft_model
-            and self.hf_config.architectures[0] == "LongcatFlashForCausalLM"
         ):
+            self.hf_config.architectures[0] = "Glm4MoeForCausalLMNextN"
+        elif arch == "GlmOcrForConditionalGeneration":
+            self.hf_config.architectures[0] = "GlmOcrForConditionalGenerationNextN"
+        elif arch == "LongcatFlashForCausalLM":
             self.hf_config.architectures[0] = "LongcatFlashForCausalLMNextN"
             self.hf_config.num_hidden_layers = self.hf_config.num_nextn_predict_layers
-
-        if is_draft_model and self.hf_config.architectures[0] == "MiMoForCausalLM":
+        elif arch == "MiMoForCausalLM":
             self.hf_config.architectures[0] = "MiMoMTP"
-        if is_draft_model and self.hf_config.architectures[0] in (
+        elif arch in (
             "MiMoV2ForCausalLM",
             "MiMoV2FlashForCausalLM",
         ):
             self.hf_config.architectures[0] = "MiMoV2MTP"
-        if is_draft_model and self.hf_config.architectures[0] == "Step3p5ForCausalLM":
+        elif arch == "Step3p5ForCausalLM":
             self.hf_config.architectures[0] = "Step3p5MTP"
-        if is_draft_model and self.hf_config.architectures[0] in [
+        elif arch in (
             "BailingMoeV2ForCausalLM",
             "BailingMoeForCausalLM",
             "BailingMoeV2_5ForCausalLM",
-        ]:
-            self.hf_config.architectures[0] = "BailingMoeForCausalLMNextN"
-        if (
-            is_draft_model
-            and self.hf_config.architectures[0] == "Ernie4_5_MoeForCausalLM"
         ):
+            self.hf_config.architectures[0] = "BailingMoeForCausalLMNextN"
+        elif arch == "Ernie4_5_MoeForCausalLM":
             self.hf_config.architectures[0] = "Ernie4_5_MoeForCausalLMMTP"
-
-        if is_draft_model and self.hf_config.architectures[0] == "Qwen3NextForCausalLM":
+        elif arch == "Qwen3NextForCausalLM":
             self.hf_config.architectures[0] = "Qwen3NextForCausalLMMTP"
             self.hf_config.num_nextn_predict_layers = 1
-
-        if is_draft_model and self.hf_config.architectures[0] in [
+        elif arch in (
             "Qwen3_5ForConditionalGeneration",
             "Qwen3_5MoeForConditionalGeneration",
-        ]:
+        ):
             self.hf_config.architectures[0] = "Qwen3_5ForCausalLMMTP"
             self.hf_config.num_nextn_predict_layers = 1
-
-        if is_draft_model and self.hf_config.architectures[0] == "ExaoneMoEForCausalLM":
+        elif arch == "ExaoneMoEForCausalLM":
             self.hf_config.architectures[0] = "ExaoneMoEForCausalLMMTP"
             self.hf_config.num_nextn_predict_layers = 1
-
-        if is_draft_model and self.hf_config.architectures[0] == "NemotronHForCausalLM":
+        elif arch == "NemotronHForCausalLM":
             self.hf_config.architectures[0] = "NemotronHForCausalLMMTP"
             self.hf_config.num_nextn_predict_layers = 1
-
-        if is_draft_model and self.hf_config.architectures[0] == "HYV3ForCausalLM":
+        elif arch == "HYV3ForCausalLM":
             self.hf_config.architectures[0] = "HYV3ForCausalLMNextN"
             self.hf_config.num_nextn_predict_layers = 1
+        elif arch == "Eagle3LlamaForCausalLM":
+            self.hf_config.architectures[0] = "LlamaForCausalLMEagle3"
 
     def _derive_hybrid_model(self):
         # Use self.context_len after it has been initialized to prevent using context_len which may be None.

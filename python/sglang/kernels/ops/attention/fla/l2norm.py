@@ -120,7 +120,7 @@ def l2norm_fwd(
 
 
 @triton.jit(do_not_specialize=["T"])
-def gdn_prefill_qkv_prepare_kernel(
+def prefill_qkv_prepare_kernel(
     q,
     k,
     v,
@@ -137,13 +137,16 @@ def gdn_prefill_qkv_prepare_kernel(
     v_stride_h,
     v_stride_d,
     T,
+    eps,
     H_QK: tl.constexpr,
     H_V: tl.constexpr,
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
+    L2NORM_QK: tl.constexpr,
 ):
-    """Materialize strided Q/K/V into token-major tensors in one launch."""
+    """Materialize strided Q/K/V into token-major tensors in one launch, with
+    Q and K L2-normalized when L2NORM_QK is set."""
     token_block = tl.program_id(0)
     head_idx = tl.program_id(1)
 
@@ -168,6 +171,12 @@ def gdn_prefill_qkv_prepare_kernel(
         )
         q_values = tl.load(q_block, boundary_check=(0, 1)).to(tl.float32)
         k_values = tl.load(k_block, boundary_check=(0, 1)).to(tl.float32)
+        if L2NORM_QK:
+            # Same math as l2norm_fwd_kernel, launched with its warps and stages.
+            q_var = tl.sum(q_values * q_values, axis=1)
+            q_values = q_values / tl.sqrt(q_var + eps)[:, None]
+            k_var = tl.sum(k_values * k_values, axis=1)
+            k_values = k_values / tl.sqrt(k_var + eps)[:, None]
         q_output_block = tl.make_block_ptr(
             q_out + head_idx * D,
             (T, D),
@@ -216,43 +225,49 @@ def gdn_prefill_qkv_prepare_kernel(
         tl.store(v_output_block, v_values, boundary_check=(0, 1))
 
 
-def gdn_prefill_qkv_prepare_fwd(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    eps: float = 1e-6,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Prepare Q/K/V for FlashInfer, materializing only strided inputs."""
+PREFILL_QKV_PREPARE_MAX_HEAD_DIM = 512
+
+
+def prefill_qkv_prepare_unsupported_reason(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+) -> Optional[str]:
+    """Why prefill_qkv_prepare_kernel cannot take these [T, H, D] inputs, or
+    None if it can."""
     if q.ndim != 3 or k.shape != q.shape or v.ndim != 3:
-        raise ValueError(
-            "GDN fused prepare requires equal Q/K [T, Hqk, D] shapes and "
-            "V [T, Hv, D], got "
+        return (
+            "requires equal Q/K [T, Hqk, D] shapes and V [T, Hv, D], got "
             f"{q.shape=}, {k.shape=}, {v.shape=}"
         )
     if v.shape[0] != q.shape[0] or v.shape[2] != q.shape[2]:
-        raise ValueError(
-            "GDN fused prepare requires common token and head-dim axes, got "
-            f"{q.shape=}, {v.shape=}"
-        )
+        return f"requires common token and head-dim axes, got {q.shape=}, {v.shape=}"
     if q.device != k.device or q.device != v.device:
-        raise ValueError("GDN fused prepare requires Q/K/V on the same device")
+        return "requires Q/K/V on the same device"
     if q.dtype != k.dtype or q.dtype != v.dtype:
-        raise ValueError("GDN fused prepare requires equal Q/K/V dtypes")
+        return "requires equal Q/K/V dtypes"
+    if q.shape[2] > PREFILL_QKV_PREPARE_MAX_HEAD_DIM:
+        return (
+            f"supports head dim <= {PREFILL_QKV_PREPARE_MAX_HEAD_DIM}, got {q.shape[2]}"
+        )
+    return None
 
+
+def _launch_prefill_qkv_prepare(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    eps: float,
+    l2norm_qk: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     T, H_QK, D = q.shape
     H_V = v.shape[1]
-    if D > 512:
-        raise ValueError(f"GDN fused prepare supports head dim <= 512, got {D}")
-    if q.is_contiguous() and k.is_contiguous() and v.is_contiguous():
-        return l2norm_fwd(q, eps), l2norm_fwd(k, eps), v
-
     q_out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
     k_out = torch.empty(k.shape, dtype=k.dtype, device=k.device)
     v_out = torch.empty(v.shape, dtype=v.dtype, device=v.device)
     BT = 16
     BD = triton.next_power_of_2(D)
     grid = (triton.cdiv(T, BT), H_QK + H_V)
-    gdn_prefill_qkv_prepare_kernel[grid](
+    prefill_qkv_prepare_kernel[grid](
         q,
         k,
         v,
@@ -269,15 +284,49 @@ def gdn_prefill_qkv_prepare_fwd(
         v.stride(1),
         v.stride(2),
         T=T,
+        eps=eps,
         H_QK=H_QK,
         H_V=H_V,
         D=D,
         BT=BT,
         BD=BD,
-        num_warps=4,
-        num_stages=2,
+        L2NORM_QK=l2norm_qk,
+        # l2norm_fwd's launch config keeps the normalized rows bit-identical.
+        num_warps=8 if l2norm_qk else 4,
+        num_stages=3 if l2norm_qk else 2,
     )
+    return q_out, k_out, v_out
+
+
+def gdn_prefill_qkv_prepare_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare Q/K/V for FlashInfer, materializing only strided inputs."""
+    reason = prefill_qkv_prepare_unsupported_reason(q, k, v)
+    if reason is not None:
+        raise ValueError(f"GDN fused prepare {reason}")
+    if q.is_contiguous() and k.is_contiguous() and v.is_contiguous():
+        return l2norm_fwd(q, eps), l2norm_fwd(k, eps), v
+
+    q_out, k_out, v_out = _launch_prefill_qkv_prepare(q, k, v, eps=eps, l2norm_qk=False)
     return l2norm_fwd(q_out, eps), l2norm_fwd(k_out, eps), v_out
+
+
+def l2norm_qk_prepare_v_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(l2norm_fwd(q), l2norm_fwd(k), v.contiguous()) for [T, H, D] inputs, in
+    one launch instead of up to five. Bit-identical to the separate calls."""
+    reason = prefill_qkv_prepare_unsupported_reason(q, k, v)
+    if reason is not None:
+        raise ValueError(f"Fused L2-norm prepare {reason}")
+    return _launch_prefill_qkv_prepare(q, k, v, eps=eps, l2norm_qk=True)
 
 
 class L2NormFunction(torch.autograd.Function):

@@ -23,7 +23,11 @@ from sglang.kernels.ops.attention.fla.fused_recurrent import (
 from sglang.kernels.ops.attention.fla.index import (
     prepare_chunk_indices,
 )
-from sglang.kernels.ops.attention.fla.l2norm import l2norm_fwd
+from sglang.kernels.ops.attention.fla.l2norm import (
+    l2norm_fwd,
+    l2norm_qk_prepare_v_fwd,
+    prefill_qkv_prepare_unsupported_reason,
+)
 from sglang.kernels.ops.attention.fla.op import exp, exp2, log
 from sglang.kernels.ops.attention.fla.utils import (
     autotune_cache_kwargs,
@@ -1271,6 +1275,18 @@ def chunk_kda_fwd(
     return o
 
 
+def _fuse_qkv_prepare(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> bool:
+    """Whether [1, T, H, D] q/k/v are strided views (e.g. column slices of a
+    packed conv output) that one fused launch can normalize and copy."""
+    if q.ndim != 4 or q.shape[0] != 1 or q.shape[1] == 0:
+        return False
+    if k.ndim != 4 or v.ndim != 4 or k.shape[0] != 1 or v.shape[0] != 1:
+        return False
+    if q.is_contiguous() and k.is_contiguous() and v.is_contiguous():
+        return False
+    return prefill_qkv_prepare_unsupported_reason(q[0], k[0], v[0]) is None
+
+
 def chunk_kda(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1296,7 +1312,9 @@ def chunk_kda(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
-    if use_qk_l2norm_in_kernel:
+    if use_qk_l2norm_in_kernel and _fuse_qkv_prepare(q, k, v):
+        q, k, v = (t.unsqueeze(0) for t in l2norm_qk_prepare_v_fwd(q[0], k[0], v[0]))
+    elif use_qk_l2norm_in_kernel:
         q = l2norm_fwd(q.contiguous())
         k = l2norm_fwd(k.contiguous())
 

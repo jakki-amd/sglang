@@ -1775,6 +1775,9 @@ class Envs:
     # set False to fall back to the per-image loop.
     SGLANG_VIT_ENABLE_VECTORIZED_POS_EMBED = EnvBool(True)
     SGLANG_MM_SKIP_COMPUTE_HASH = EnvBool(False)
+    # ROCm keeps one ViT call per request in chunked prefill; set True to encode
+    # the image misses of all requests in one call, as on CUDA.
+    SGLANG_HIP_MM_CROSS_REQUEST_VIT_BATCH = EnvBool(False)
     # Supported by Kimi-K2.5 and native diffusion RGB input preprocessing.
     SGLANG_FORCE_CPU_IMAGE_PREPROCESSING = EnvBool(False)
     # For pre-tokenized (list[int]) multimodal prompts,

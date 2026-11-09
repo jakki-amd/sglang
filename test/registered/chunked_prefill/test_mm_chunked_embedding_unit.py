@@ -319,11 +319,14 @@ def test_batched_colliding_hashes_with_different_lengths_are_not_deduplicated():
     encoder.assert_called_once()
 
 
+@pytest.mark.parametrize("hip_vit_batch", [False, True])
 @pytest.mark.parametrize("backend", ["cuda", "npu", "hip", "xpu"])
-def test_cross_request_image_batching_by_backend(monkeypatch, backend):
-    """CUDA/NPU merge misses; HIP/XPU keep per-request encoding and output order."""
+def test_cross_request_image_batching_by_backend(monkeypatch, backend, hip_vit_batch):
+    """CUDA/NPU merge misses; XPU, and HIP without the opt-in, keep per-request
+    encoding. Both paths give the same output in request order."""
     for name in ("hip", "npu", "xpu"):
         monkeypatch.setattr(mm_schedule, f"_is_{name}", backend == name)
+    monkeypatch.setenv("SGLANG_HIP_MM_CROSS_REQUEST_VIT_BATCH", str(hip_vit_batch))
     mm_schedule.init_mm_embedding_cache(1 << 30)
     items = _make_items()[:2]
     encoder = Mock(side_effect=_encoder_tensor)
@@ -342,9 +345,8 @@ def test_cross_request_image_batching_by_backend(monkeypatch, backend):
 
     expected = _encoder_tensor(items)
     torch.testing.assert_close(encode(), expected, rtol=0, atol=0)
-    expected_calls = (
-        [items] if backend in ("cuda", "npu") else [[item] for item in items]
-    )
+    batched = backend in ("cuda", "npu") or (backend == "hip" and hip_vit_batch)
+    expected_calls = [items] if batched else [[item] for item in items]
     assert [call.args[0] for call in encoder.call_args_list] == expected_calls
     encoder.reset_mock()
     torch.testing.assert_close(encode(), expected, rtol=0, atol=0)

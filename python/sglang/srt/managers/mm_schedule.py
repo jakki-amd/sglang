@@ -7,6 +7,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 
+from sglang.srt.environ import envs
 from sglang.srt.managers.req_types import MultimodalDataItem
 from sglang.srt.mem_cache.multimodal_cache import EmbeddingResult, MultiModalStaticCache
 from sglang.srt.multimodal.evs import EVSEmbeddingResult
@@ -590,6 +591,14 @@ def _assemble_per_image_chunk(
     ]
 
 
+def _batches_images_across_requests() -> bool:
+    # ROCm CI regressed with one large cross-request ViT batch, so HIP batches
+    # only on opt-in. XPU keeps the per-request path.
+    if _is_hip:
+        return envs.SGLANG_HIP_MM_CROSS_REQUEST_VIT_BATCH.get()
+    return not _is_xpu
+
+
 def _get_chunked_prefill_embedding(
     data_embedding_func: DataEmbeddingFunc,
     embedding_items: List[MultimodalDataItem],
@@ -607,6 +616,7 @@ def _get_chunked_prefill_embedding(
     device = input_ids.device
     # FIXME(Xinyuan): temporary workaround for eagle3
     max_iterations = min(len(items_size) - 1, len(prefix_length))
+    batch_across_requests = _batches_images_across_requests()
 
     # Phase 0: classify requests into per-image vs full/EVS path
     per_image_requests = []  # batched ViT encoding
@@ -647,9 +657,7 @@ def _get_chunked_prefill_embedding(
             for item in embedding_items_per_req
         )
         if is_per_image:
-            if _is_hip or _is_xpu:
-                # ROCm CI regressed with one large cross-request ViT batch; keep
-                # the previous per-request path on HIP/XPU while CUDA and NPU use batching.
+            if not batch_across_requests:
                 chunk_slices = _get_chunked_embedding_by_item(
                     data_embedding_func,
                     embedding_items_per_req,
